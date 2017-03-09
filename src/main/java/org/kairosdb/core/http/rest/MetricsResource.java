@@ -27,6 +27,7 @@ import com.google.inject.name.Named;
 import org.kairosdb.core.DataPointSet;
 import org.kairosdb.core.KairosDataPointFactory;
 import org.kairosdb.core.datapoints.*;
+import org.kairosdb.core.datastore.CachedSearchResult2;
 import org.kairosdb.core.datastore.DataPointGroup;
 import org.kairosdb.core.datastore.DatastoreQuery;
 import org.kairosdb.core.datastore.KairosDatastore;
@@ -454,6 +455,9 @@ public class MetricsResource implements KairosMetricReporter
 			int queryCount = 0;
 			for (QueryMetric query : queries)
 			{
+			    // with caching enabled on buckets, adjust startTime to align to a bucket for now.
+			    query.setStartTime(CachedSearchResult2.truncate(query.getStartTime(),60_000));
+			    
 				queryCount++;
 				ThreadReporter.addTag("metric_name", query.getName());
 				ThreadReporter.addTag("query_index", String.valueOf(queryCount));

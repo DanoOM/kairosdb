@@ -462,11 +462,41 @@ public class KairosDatastore
 				/*searchResult = new MemorySearchResult(m_metric.getName());
 				m_datastore.queryDatabase(m_metric, searchResult);
 				returnedRows = searchResult.getRows();*/
-
+				boolean bucketCache = true;
+				long startTime = m_metric.getStartTime();
+				SearchResult cachedResult = null;
 				if (m_metric.getCacheTime() > 0)
 				{
-					searchResult = CachedSearchResult.openCachedSearchResult(m_metric.getName(),
-							tempFile, m_metric.getCacheTime(), m_dataPointFactory, m_keepCacheFiles);
+				    if (bucketCache) {
+				        long endTime = m_metric.getEndTime();
+				        if (endTime == Long.MAX_VALUE){
+				            endTime = System.currentTimeMillis() - 60_000;
+				        }
+    					cachedResult = CachedSearchResult2.openCachedSearchResult(m_metric.getName(),
+    							                                                        tempFile, 
+    							                                                        m_metric.getCacheTime(), 
+    							                                                        m_dataPointFactory, 
+    							                                                        m_keepCacheFiles,
+    							                                                        startTime,
+    							                                                        60_000,
+    							                                                        endTime);
+    					if (cachedResult != null && ((CachedSearchResult2)cachedResult).getEndTime() < endTime) {
+    					    // need to load from endTime! since the cache is missing some data.
+    					    startTime = endTime;
+    					    searchResult = null;
+    					}
+    					else {
+    					    // all data cached.
+    					    searchResult = cachedResult;
+    					}
+    				 }
+				    else {
+				        searchResult = CachedSearchResult.openCachedSearchResult(m_metric.getName(),
+                                tempFile, 
+                                m_metric.getCacheTime(), 
+                                m_dataPointFactory, 
+                                m_keepCacheFiles);				        
+				    }
 					if (searchResult != null)
 					{
 						returnedRows = searchResult.getRows();
@@ -477,9 +507,27 @@ public class KairosDatastore
 				if (searchResult == null)
 				{
 					logger.debug("Cache MISS!");
-					searchResult = CachedSearchResult.createCachedSearchResult(m_metric.getName(),
-							tempFile, m_dataPointFactory, m_keepCacheFiles);
+					if (bucketCache) {
+					    searchResult = CachedSearchResult2.createCachedSearchResult(m_metric.getName(),
+							                                                                                                        tempFile, 
+							                                                                                                        m_dataPointFactory, 
+							                                                                                                        m_keepCacheFiles,
+							                                                                                                        startTime,
+							                                                                                                        60_000);					 
+					}
+					else {
+					    searchResult = CachedSearchResult.createCachedSearchResult(m_metric.getName(),
+                                tempFile, 
+                                m_dataPointFactory, 
+                                m_keepCacheFiles);
+					}
 					m_datastore.queryDatabase(m_metric, searchResult);
+					
+					if (cachedResult != null) {
+                           ((CachedSearchResult2)cachedResult).attachResults(((CachedSearchResult2)searchResult));
+                           searchResult = cachedResult;
+                   }
+					   
 					returnedRows = searchResult.getRows();
 				}
 			}
@@ -501,7 +549,9 @@ public class KairosDatastore
             ThreadReporter.addDataPoint(QUERY_ROW_COUNT, m_rowCount);
 
 			List<DataPointGroup> queryResults = groupByTypeAndTag(m_metric.getName(),
-					returnedRows, getTagGroupBy(m_metric.getGroupBys()), m_metric.getOrder());
+					                                                                                                 returnedRows, 
+					                                                                                                 getTagGroupBy(m_metric.getGroupBys()), 
+					                                                                                                 m_metric.getOrder());
 
 
 			// Now group for all other types of group bys.
