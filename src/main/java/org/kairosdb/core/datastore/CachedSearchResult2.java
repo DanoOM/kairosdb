@@ -16,6 +16,28 @@
 
 package org.kairosdb.core.datastore;
 
+import java.io.DataInputStream;
+import java.io.Externalizable;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.ObjectInput;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutput;
+import java.io.ObjectOutputStream;
+import java.io.RandomAccessFile;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.kairosdb.core.DataPoint;
 import org.kairosdb.core.KairosDataPointFactory;
 import org.kairosdb.util.BufferedDataInputStream;
@@ -24,13 +46,6 @@ import org.kairosdb.util.MemoryMonitor;
 import org.kairosdb.util.StringPool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.*;
-import java.util.*;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-
-import javax.naming.ldap.StartTlsRequest;
 
 public class CachedSearchResult2 implements SearchResult
 {
@@ -60,46 +75,53 @@ public class CachedSearchResult2 implements SearchResult
 	private final long m_timeWindow;
 	private  long m_endTime;
 	private String m_type;
-	private Map<String,String> m_tags;	
+	private Map<String,String> m_tags;
 	public void setType(String type){
 	    m_type  = type;
 	}
-	
+
 	public void setTags(Map<String,String> tags){
 	    m_tags = tags;
 	}
-	
+
 	// treemap - ensure itration is in order..
-	private final TreeMap<Integer,CachedSearchResult2> m_buckets = new TreeMap<>(); 
+	private final TreeMap<Long,CachedSearchResult2> m_buckets = new TreeMap<>();
 
 
-	private static File getIndexFile(String baseFileName)
+	private static String formatTime(long time) {
+	    SimpleDateFormat sdf = new SimpleDateFormat("YYYYMMdd'-'HHmmss");
+        return sdf.format(new Date(time));
+	}
+	private static File getIndexFile(String baseFileName, long time)
 	{
-		String indexFileName = baseFileName + ".index";
-
+	    if (time % 60_000 != 0){
+	        System.out.println("?????");
+	    }
+	    String dt = formatTime(time);
+		String indexFileName = baseFileName + dt + ".index";
 		return (new File(indexFileName));
 	}
 
-	private static File getDataFile(String baseFileName)
+	private static File getDataFile(String baseFileName, long time)
 	{
-		String dataFileName = baseFileName+".data";
-
+        String dt = formatTime(time);
+		String dataFileName = baseFileName + dt + ".data";
 		return (new File(dataFileName));
 	}
 
-	private CachedSearchResult2(String metricName, 
-	                                                        String baseFileName,
-	                                                        KairosDataPointFactory datatPointFactory, 
-	                                                        boolean keepCacheFiles,
-	                                                        long startTime,
-	                                                        long timeWindow)
+	private CachedSearchResult2(String metricName,
+                                String baseFileName,
+                                KairosDataPointFactory datatPointFactory,
+                                boolean keepCacheFiles,
+                                long startTime,
+                                long timeWindow)
 			throws FileNotFoundException
 	{
 	    m_baseFileName = baseFileName;
 		m_metricName = metricName;
-		m_indexFile = getIndexFile(baseFileName + "-" + startTime);
+		m_indexFile = getIndexFile(baseFileName, startTime);
 		m_dataPointSets = new ArrayList<FilePositionMarker>();
-		m_dataFile = getDataFile(baseFileName+ "-" +startTime) ;
+		m_dataFile = getDataFile(baseFileName,startTime) ;
 		m_dataPointFactory = datatPointFactory;
 		m_stringPool = new StringPool();
 		m_keepCacheFiles = keepCacheFiles;
@@ -157,6 +179,10 @@ public class CachedSearchResult2 implements SearchResult
 		if (m_readFromCache)
 			return; //No need to save if we read it from the file
 
+		System.out.println("-- Saving Index: " + m_indexFile);
+		if (!m_indexFile.getName().endsWith("00.index")){
+		    System.out.println("hello?");
+		}
 		ObjectOutputStream out = new ObjectOutputStream(new FileOutputStream(m_indexFile));
 
 		//todo: write out a type lookup table
@@ -174,28 +200,28 @@ public class CachedSearchResult2 implements SearchResult
 	public static long truncate(long time, long timewindow){
 	    return timewindow * (time / timewindow);
 	}
-	
+
 	public static CachedSearchResult2 createCachedSearchResult(String metricName,
-                                                                                                        			String baseFileName, 
-                                                                                                        			KairosDataPointFactory dataPointFactory,
-                                                                                                        			boolean keepCacheFiles, 
-                                                                                                        			long startTime, 
-                                                                                                        			long timeWindow)
+                                                			String baseFileName,
+                                                			KairosDataPointFactory dataPointFactory,
+                                                			boolean keepCacheFiles,
+                                                			long startTime,
+                                                			long timeWindow)
 			throws IOException
-	{	    
-		File dataFile = getDataFile(baseFileName +"-"+  startTime);
-		File indexFile = getIndexFile(baseFileName +"-"+  startTime);
+	{
+		File dataFile = getDataFile(baseFileName,startTime);
+		File indexFile = getIndexFile(baseFileName,startTime);
 
 		//Just in case the file are there.
-//		dataFile.delete();
-//		indexFile.delete();
+		//dataFile.delete();
+		//indexFile.delete();
 
-		CachedSearchResult2 ret = new CachedSearchResult2(metricName, 
-		                                                                                                 baseFileName,				                                                                                        
-				                                                                                        dataPointFactory, 
-				                                                                                        keepCacheFiles,
-				                                                                                        startTime,
-				                                                                                        timeWindow);
+		CachedSearchResult2 ret = new CachedSearchResult2(metricName,
+                                                         baseFileName,
+                                                         dataPointFactory,
+                                                         keepCacheFiles,
+                                                         startTime,
+                                                         timeWindow);
 
 		return (ret);
 	}
@@ -207,52 +233,47 @@ public class CachedSearchResult2 implements SearchResult
 	 @return The CachedSearchResult if the file exists or null if it doesn't
 	 */
 	public static CachedSearchResult2 openCachedSearchResult(String metricName,
-			                                                                                                       String baseFileName, 
-			                                                                                                       int cacheTime, 
-			                                                                                                       KairosDataPointFactory dataPointFactory,
-			                                                                                                       boolean keepCacheFiles, 
-			                                                                                                       long startTime, 
-			                                                                                                       long timeWindow,
-			                                                                                                       long endTime) throws IOException
+                                                             String baseFileName,
+                                                             int cacheTime,
+                                                             KairosDataPointFactory dataPointFactory,
+                                                             boolean keepCacheFiles,
+                                                             long startTime,
+                                                             long timeWindow,
+                                                             long endTime) throws IOException
 	{
-		CachedSearchResult2 ret = null;		
-		File dataFile = getDataFile(baseFileName +  "-" +startTime);
-		File indexFile = getIndexFile(baseFileName + "-" +startTime);
-		long now = System.currentTimeMillis();
-
-		if (dataFile.exists() && indexFile.exists() && ((now - dataFile.lastModified()) < ((long)cacheTime * 1000)))
-		{
-			ret = new CachedSearchResult2(metricName, baseFileName, dataPointFactory, keepCacheFiles, startTime,timeWindow);
-			ret.createBuckets(startTime, endTime);			
-			try
-			{
-				ret.loadIndex();
-			}
-			catch (ClassNotFoundException e)
-			{
-				logger.error("Unable to load cache file", e);
-				ret = null;
-			}
+	    CachedSearchResult2 ret = new CachedSearchResult2(metricName, baseFileName, dataPointFactory, keepCacheFiles, startTime,timeWindow);
+		if (ret.createBuckets(startTime, endTime) == 0) {
+		    // no data in cache, return.
+		    ret = null;
+		    return ret;
 		}
-
+		try
+		{
+			ret.loadIndex();
+		}
+		catch (ClassNotFoundException e)
+		{
+			logger.error("Unable to load cache file", e);
+			ret = null;
+		}
 		return (ret);
 	}
-	
+
 	public long getEndTime() {
 	    return m_endTime;
 	}
-	
+
 	public long getStartTime() {
 	    return m_startTime;
 	}
-	
-	public Map<Integer,CachedSearchResult2> getBuckets(){
+
+	public Map<Long,CachedSearchResult2> getBuckets(){
 	    return m_buckets;
 	}
-	
+
 	public void attachResults(CachedSearchResult2 result) {
 	    //xxx long startTime = result.getStartTime();
-	    int largestKey = m_buckets.lastKey()+1;
+	    long largestKey = m_buckets.lastKey()+1;
 	    m_buckets.put(largestKey, result);// put the root in
 	    /*if (result.getBuckets() != null) {
 	        for (CachedSearchResult2 value: result.getBuckets().values()){
@@ -260,51 +281,55 @@ public class CachedSearchResult2 implements SearchResult
 	        }
 	    }*/
 	}
-	
-	// returns the bucket startTime, where we need to load new data from.
-	// returns 0 on error
-	// returns -1 on all data in cache.
-	private long createBuckets(long startTime, long endTime) throws IOException {	    
-	        startTime = startTime + 60_000;	        
-	        while(startTime < endTime) {
-    	        int bucketIndex = (int)((startTime + 60_000 - m_startTime) / m_timeWindow);
-                startTime =truncate (m_startTime + bucketIndex * m_timeWindow, m_timeWindow);
-                File indexFile = getIndexFile(m_baseFileName + "-" +startTime);
-                if (!indexFile.exists()) {
-                        System.out.println("Missing Data at: " + startTime);
+
+	// fix this..need better resutls.
+	private long createBuckets(long startTime, long endTime) throws IOException {
+	    boolean cacheHit = false;
+	    int indexHoles = 0;
+	    startTime = truncate (m_startTime, m_timeWindow);
+        while(startTime < endTime) {
+            File indexFile = getIndexFile(m_baseFileName, startTime);
+            if (!indexFile.exists()) {
+                System.out.println("Missing Data at: " + startTime);
+                indexHoles++;
+            }
+            else {
+                cacheHit = true;
+                m_endTime = startTime; // this is the last time bucket found
+                System.out.println("Cache hit at:" + startTime + " initial LoadTime Request:" + m_startTime + " diff: " + ((startTime - m_startTime)/1000));
+                CachedSearchResult2 bucket = createCachedSearchResult(m_metricName,
+                                                                      m_baseFileName ,
+                                                                      m_dataPointFactory,
+                                                                      m_keepCacheFiles,
+                                                                      startTime,
+                                                                      m_timeWindow);
+                try {
+                    System.out.println("loading Index for bucket: " + bucket.m_indexFile.getName());
+                    bucket.loadIndex();
                 }
-                else {
-                    m_endTime = startTime; // this is the last time bucket found
-                    System.out.println("Cache hit at:" + startTime + " initial LoadTime Request:" + m_startTime + " diff: " + ((startTime - m_startTime)/1000));
-                    CachedSearchResult2 bucket = createCachedSearchResult(m_metricName, 
-                                                                                                                             m_baseFileName ,
-                                                                                                                             m_dataPointFactory,
-                                                                                                                             m_keepCacheFiles,
-                                                                                                                             startTime,
-                                                                                                                             m_timeWindow);   
-                    try {
-                        bucket.loadIndex();
-                    }
-                    catch(ClassNotFoundException e) {
-                        logger.error("Unable to load cache file", e);
-                        return 0;
-                    }
-                    m_buckets.put(bucketIndex, bucket);
+                catch(ClassNotFoundException e) {
+                    logger.error("Unable to load cache file", e);
+                    return 0;
                 }
-                startTime = startTime + 60_000;
-	        }
-	        return -1;
+                m_buckets.put(startTime, bucket);
+            }
+            startTime = startTime + 60_000;
+        }
+        if (cacheHit)
+            return startTime;
+        return 0;
 	}
 
 	/**
 	 Call when finished adding datapoints to the cache file
 	 */
-	public void endDataPoints() throws IOException
+	@Override
+    public void endDataPoints() throws IOException
 	{
 	    if (m_buckets != null) {
 	        for (CachedSearchResult2 bucket : m_buckets.values()) {
 	            bucket.endDataPoints2();
-	        }	        
+	        }
 	    }
 		if (m_randomAccessFile == null)
 			return;
@@ -318,9 +343,9 @@ public class CachedSearchResult2 implements SearchResult
 
 		calculateMaxReadBufferSize();
 	}
-	
+
 	public void endDataPoints2() throws IOException
-    {        
+    {
         if (m_randomAccessFile == null)
             return;
 
@@ -365,7 +390,7 @@ public class CachedSearchResult2 implements SearchResult
 		        }
 		    }
 		    close();
-		}		
+		}
 	}
 
 
@@ -374,10 +399,11 @@ public class CachedSearchResult2 implements SearchResult
 	 of the set to be saved.  All inserted datapoints after this call are
 	 expected to be in ascending time order and have the same tags.
 	 */
-	public void startDataPointSet(String type, Map<String, String> tags) throws IOException
+	@Override
+    public void startDataPointSet(String type, Map<String, String> tags) throws IOException
 	{
 	    if (m_currentBucket != null) {
-	        m_currentBucket.startDataPointSet(type, tags);
+	        m_currentBucket.startDataPointSet2(type, tags);
 	        return;
 	    }
 	    m_type = type;
@@ -392,16 +418,16 @@ public class CachedSearchResult2 implements SearchResult
 		m_currentFilePositionMarker = new FilePositionMarker(curPosition, tags, type);
 		m_dataPointSets.add(m_currentFilePositionMarker);
 	}
-	
+
 	private void startDataPointSet2(String type, Map<String, String> tags) throws IOException
-    {        
+    {
         m_type = type;
         m_tags = tags;
         //todo: need a lock around this, cql returns results overlapping.
         if (m_randomAccessFile == null)
             openCacheFile();
 
-        endDataPoints();
+        endDataPoints2();
 
         long curPosition = m_dataOutputStream.getPosition();
         m_currentFilePositionMarker = new FilePositionMarker(curPosition, tags, type);
@@ -410,27 +436,20 @@ public class CachedSearchResult2 implements SearchResult
 
 
 	private CachedSearchResult2 m_currentBucket;
-	private long currentBucketIndex = 0;
+	private long m_currentBucketTime = 0;
 
 	@Override
 	public void addDataPoint(DataPoint datapoint) throws IOException
-	{	    
+	{
 	    long ts = datapoint.getTimestamp();
-	    int bucketIndex = (int)((ts - m_startTime)/ m_timeWindow);
-	    
-	    if (bucketIndex != currentBucketIndex) {	        
-	        System.out.println("new Bucket");
-	        long startTime =truncate (m_startTime + bucketIndex*m_timeWindow, m_timeWindow);
-	        
-	        CachedSearchResult2 bucket = m_buckets.get(bucketIndex); 
+	    long timeBucket = truncate(ts, m_timeWindow);
+	    if (timeBucket != m_currentBucketTime) {
+	        System.out.println("new Bucket: " + formatTime(timeBucket));
+	        CachedSearchResult2 bucket = m_buckets.get(timeBucket);
 	        if (bucket == null)
-	            bucket = createCachedSearchResult(m_metricName, m_baseFileName ,m_dataPointFactory,m_keepCacheFiles,startTime,m_timeWindow);	        
-	        m_buckets.put(bucketIndex, bucket);
-	        //if (m_currentBucket != null) {
-	        //    m_currentBucket.endDataPoints();
-	        //}	        
+	            bucket = createCachedSearchResult(m_metricName, m_baseFileName ,m_dataPointFactory,m_keepCacheFiles,timeBucket,m_timeWindow);
+	        m_buckets.put(timeBucket, bucket);
 	        m_currentBucket = bucket;
-	        currentBucketIndex = bucketIndex;
 	        m_currentBucket.startDataPointSet2(m_type, m_tags);
 	    }
 	    if (m_currentBucket != null) {
@@ -439,17 +458,17 @@ public class CachedSearchResult2 implements SearchResult
 	    else {
     		m_dataOutputStream.writeLong(datapoint.getTimestamp());
     		datapoint.writeValueToBuffer(m_dataOutputStream);
-    
+
     		m_currentFilePositionMarker.incrementDataPointCount();
 	    }
 	}
-	
-	
+
+
     private void addDataPt(DataPoint datapoint) throws IOException
-    {             
+    {
             m_dataOutputStream.writeLong(datapoint.getTimestamp());
-            datapoint.writeValueToBuffer(m_dataOutputStream);    
-            m_currentFilePositionMarker.incrementDataPointCount();     
+            datapoint.writeValueToBuffer(m_dataOutputStream);
+            m_currentFilePositionMarker.incrementDataPointCount();
     }
 
 	@Override
@@ -467,24 +486,24 @@ public class CachedSearchResult2 implements SearchResult
 		if (m_buckets != null) {
 		    for (CachedSearchResult2 bucket: m_buckets.values()) {
 		        bucket.getRows(ret);
-		    }		    
+		    }
 		}
 		return (ret);
 	}
-	
+
 	public List<DataPointRow> getRows(List<DataPointRow> rows)
-    {        
+    {
         MemoryMonitor mm = new MemoryMonitor(20);
         for (FilePositionMarker dpSet : m_dataPointSets)
         {
             rows.add(dpSet.iterator());
             m_closeCounter.incrementAndGet();
             mm.checkMemoryAndThrowException();
-        }        
+        }
         return (rows);
     }
-	
-	
+
+
 	//===========================================================================
 	private class FilePositionMarker implements Iterable<DataPoint>, Externalizable
 	{
@@ -585,9 +604,9 @@ public class CachedSearchResult2 implements SearchResult
 		private int m_dataPointsRead = 0;
 
 		public CachedDataPointRow(Map<String, String> tags,
-                                        				    long startPosition, 
-                                        				    long endPostition, 
-                                        				    String dataType, 
+                                        				    long startPosition,
+                                        				    long endPostition,
+                                        				    String dataType,
                                         				    int dataPointCount)
 		{
 			m_currentPosition = startPosition;
@@ -603,14 +622,14 @@ public class CachedSearchResult2 implements SearchResult
 			int rowSize = (int) (m_endPostition - m_currentPosition);
 			if (m_buckets != null) {
 //	xxx		    for (CachedSearchResult2 bucket: m_buckets){
-			//xx        rowSize += bucket.getRowSize();			        
+			//xx        rowSize += bucket.getRowSize();
 //			    }
 			}
-	        int bufferSize = (rowSize < m_maxReadBufferSize ? rowSize : m_maxReadBufferSize);			
+	        int bufferSize = (rowSize < m_maxReadBufferSize ? rowSize : m_maxReadBufferSize);
 			m_readBuffer = new BufferedDataInputStream(m_randomAccessFile, m_currentPosition, bufferSize);
 		}
-		
-		
+
+
 
 
 		@Override

@@ -16,21 +16,8 @@
 package org.kairosdb.core.datastore;
 
 
-import com.google.common.collect.ArrayListMultimap;
-import com.google.common.collect.ImmutableSortedMap;
-import com.google.common.collect.ListMultimap;
-import com.google.inject.Inject;
-import com.google.inject.name.Named;
-import org.kairosdb.core.DataPoint;
-import org.kairosdb.core.KairosDataPointFactory;
-import org.kairosdb.core.aggregator.Aggregator;
-import org.kairosdb.core.aggregator.LimitAggregator;
-import org.kairosdb.core.exception.DatastoreException;
-import org.kairosdb.core.groupby.*;
-import org.kairosdb.core.reporting.ThreadReporter;
-import org.kairosdb.util.MemoryMonitor;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import static com.google.common.base.Preconditions.checkNotNull;
+import static com.google.common.base.Preconditions.checkState;
 
 import java.io.File;
 import java.io.IOException;
@@ -38,10 +25,35 @@ import java.io.UnsupportedEncodingException;
 import java.math.BigInteger;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 
-import static com.google.common.base.Preconditions.checkNotNull;
-import static com.google.common.base.Preconditions.checkState;
+import org.kairosdb.core.DataPoint;
+import org.kairosdb.core.KairosDataPointFactory;
+import org.kairosdb.core.aggregator.Aggregator;
+import org.kairosdb.core.aggregator.LimitAggregator;
+import org.kairosdb.core.exception.DatastoreException;
+import org.kairosdb.core.groupby.GroupBy;
+import org.kairosdb.core.groupby.GroupByResult;
+import org.kairosdb.core.groupby.Grouper;
+import org.kairosdb.core.groupby.TagGroupBy;
+import org.kairosdb.core.groupby.TagGroupByResult;
+import org.kairosdb.core.groupby.TypeGroupByResult;
+import org.kairosdb.core.reporting.ThreadReporter;
+import org.kairosdb.util.MemoryMonitor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.ListMultimap;
+import com.google.inject.Inject;
+import com.google.inject.name.Named;
 
 public class KairosDatastore
 {
@@ -92,7 +104,7 @@ public class KairosDatastore
 	@SuppressWarnings("ResultOfMethodCallIgnored")
 	private void setupCacheDirectory()
 	{
-		cleanDirectory(new File(m_baseCacheDir));
+		//cleanDirectory(new File(m_baseCacheDir));
 		newCacheDirectory();
 		File cacheDirectory = new File(m_cacheDir);
 		cacheDirectory.mkdirs();
@@ -120,7 +132,7 @@ public class KairosDatastore
 	@SuppressWarnings("ResultOfMethodCallIgnored")
 	private void newCacheDirectory()
 	{
-		String newCacheDir = m_baseCacheDir + "/" + System.currentTimeMillis() + "/";
+		String newCacheDir = m_baseCacheDir;//+ System.currentTimeMillis() + "/";
 		ensureFolder(newCacheDir);
 		m_cacheDir = newCacheDir;
 	}
@@ -406,8 +418,14 @@ public class KairosDatastore
 	private static String calculateFilenameHash(QueryMetric metric) throws NoSuchAlgorithmException, UnsupportedEncodingException
 	{
 		String hashString = metric.getCacheString();
+
 		if (hashString == null)
 			hashString = String.valueOf(System.currentTimeMillis());
+		else {
+		    String dir = hashString.substring(0, hashString.indexOf(":"));
+		    dir = "/" + dir + "/";
+		    return dir;
+		}
 
 		MessageDigest messageDigest = MessageDigest.getInstance("MD5");
 		byte[] digest = messageDigest.digest(hashString.getBytes("UTF-8"));
@@ -423,7 +441,7 @@ public class KairosDatastore
 		private List<DataPointGroup> m_results;
 		private int m_dataPointCount;
 		private int m_rowCount;
-		
+
 		public DatastoreQueryImpl(QueryMetric metric)
 				throws UnsupportedEncodingException, NoSuchAlgorithmException,
 				InterruptedException, DatastoreException
@@ -440,7 +458,8 @@ public class KairosDatastore
 			m_queuingManager.waitForTimeToRun(m_cacheFilename);
 		}
 
-		public int getSampleSize()
+		@Override
+        public int getSampleSize()
 		{
 			return m_dataPointCount;
 		}
@@ -450,7 +469,7 @@ public class KairosDatastore
 		public List<DataPointGroup> execute() throws DatastoreException
 		{
 			long queryStartTime = System.currentTimeMillis();
-			
+
 			SearchResult searchResult = null;
 
 			List<DataPointRow> returnedRows = null;
@@ -469,20 +488,24 @@ public class KairosDatastore
 				{
 				    if (bucketCache) {
 				        long endTime = m_metric.getEndTime();
-				        if (endTime == Long.MAX_VALUE){
-				            endTime = System.currentTimeMillis() - 60_000;
+				        if (endTime == Long.MAX_VALUE) {
+				            endTime = CachedSearchResult2.truncate(System.currentTimeMillis() - 60_000, 60_000);
 				        }
     					cachedResult = CachedSearchResult2.openCachedSearchResult(m_metric.getName(),
-    							                                                        tempFile, 
-    							                                                        m_metric.getCacheTime(), 
-    							                                                        m_dataPointFactory, 
+    							                                                        tempFile,
+    							                                                        m_metric.getCacheTime(),
+    							                                                        m_dataPointFactory,
     							                                                        m_keepCacheFiles,
     							                                                        startTime,
     							                                                        60_000,
     							                                                        endTime);
     					if (cachedResult != null && ((CachedSearchResult2)cachedResult).getEndTime() < endTime) {
     					    // need to load from endTime! since the cache is missing some data.
-    					    startTime = endTime;
+    					    System.out.println("Cache hit on: " +(endTime - startTime)/1000);
+    					    startTime = ((CachedSearchResult2)cachedResult).getEndTime();
+    					    System.out.println("Cache Miss on: " +(endTime - startTime)/1000);
+
+    					    m_metric.setStartTime(startTime);
     					    searchResult = null;
     					}
     					else {
@@ -492,10 +515,10 @@ public class KairosDatastore
     				 }
 				    else {
 				        searchResult = CachedSearchResult.openCachedSearchResult(m_metric.getName(),
-                                tempFile, 
-                                m_metric.getCacheTime(), 
-                                m_dataPointFactory, 
-                                m_keepCacheFiles);				        
+                                                                                tempFile,
+                                                                                m_metric.getCacheTime(),
+                                                                                m_dataPointFactory,
+                                                                                m_keepCacheFiles);
 				    }
 					if (searchResult != null)
 					{
@@ -509,25 +532,25 @@ public class KairosDatastore
 					logger.debug("Cache MISS!");
 					if (bucketCache) {
 					    searchResult = CachedSearchResult2.createCachedSearchResult(m_metric.getName(),
-							                                                                                                        tempFile, 
-							                                                                                                        m_dataPointFactory, 
-							                                                                                                        m_keepCacheFiles,
-							                                                                                                        startTime,
-							                                                                                                        60_000);					 
+                                                                                    tempFile,
+                                                                                    m_dataPointFactory,
+                                                                                    m_keepCacheFiles,
+                                                                                    startTime,
+                                                                                    60_000);
 					}
 					else {
 					    searchResult = CachedSearchResult.createCachedSearchResult(m_metric.getName(),
-                                tempFile, 
-                                m_dataPointFactory, 
-                                m_keepCacheFiles);
+                                                                                    tempFile,
+                                                                                    m_dataPointFactory,
+                                                                                    m_keepCacheFiles);
 					}
 					m_datastore.queryDatabase(m_metric, searchResult);
-					
+
 					if (cachedResult != null) {
                            ((CachedSearchResult2)cachedResult).attachResults(((CachedSearchResult2)searchResult));
                            searchResult = cachedResult;
                    }
-					   
+
 					returnedRows = searchResult.getRows();
 				}
 			}
@@ -549,8 +572,8 @@ public class KairosDatastore
             ThreadReporter.addDataPoint(QUERY_ROW_COUNT, m_rowCount);
 
 			List<DataPointGroup> queryResults = groupByTypeAndTag(m_metric.getName(),
-					                                                                                                 returnedRows, 
-					                                                                                                 getTagGroupBy(m_metric.getGroupBys()), 
+					                                                                                                 returnedRows,
+					                                                                                                 getTagGroupBy(m_metric.getGroupBys()),
 					                                                                                                 m_metric.getOrder());
 
 
