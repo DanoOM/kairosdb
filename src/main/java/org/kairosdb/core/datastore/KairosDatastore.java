@@ -478,7 +478,7 @@ public class KairosDatastore
 				{
 					logger.debug("Cache MISS!");
 					searchResult = CachedSearchResult.createCachedSearchResult(m_metric.getName(),
-							tempFile, m_dataPointFactory, m_keepCacheFiles);
+							tempFile, m_dataPointFactory, m_keepCacheFiles);					
 					m_datastore.queryDatabase(m_metric, searchResult);
 					returnedRows = searchResult.getRows();
 				}

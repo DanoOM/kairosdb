@@ -265,7 +265,11 @@ public class CachedSearchResult implements SearchResult
 	@Override
 	public void addDataPoint(DataPoint datapoint) throws IOException
 	{
-		m_dataOutputStream.writeLong(datapoint.getTimestamp());
+		try {
+		    m_dataOutputStream.writeLong(datapoint.getTimestamp());
+		}catch(Exception e){
+		    e.printStackTrace();
+		}
 		datapoint.writeValueToBuffer(m_dataOutputStream);
 
 		m_currentFilePositionMarker.incrementDataPointCount();

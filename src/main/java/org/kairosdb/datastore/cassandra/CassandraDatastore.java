@@ -15,20 +15,45 @@
  */
 package org.kairosdb.datastore.cassandra;
 
-import com.datastax.driver.core.*;
-import com.google.common.collect.SetMultimap;
-import com.google.common.eventbus.EventBus;
-import com.google.common.eventbus.Subscribe;
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.inject.Inject;
-import com.google.inject.name.Named;
+import static com.google.common.base.Preconditions.checkNotNull;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
+import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.SortedMap;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+
+import javax.annotation.Nullable;
+
 import org.kairosdb.core.DataPoint;
 import org.kairosdb.core.DataPointSet;
 import org.kairosdb.core.KairosDataPointFactory;
-import org.kairosdb.core.datapoints.*;
-import org.kairosdb.core.datastore.*;
+import org.kairosdb.core.datapoints.DataPointFactory;
+import org.kairosdb.core.datapoints.LegacyDataPointFactory;
+import org.kairosdb.core.datapoints.LegacyDoubleDataPoint;
+import org.kairosdb.core.datapoints.LegacyLongDataPoint;
+import org.kairosdb.core.datastore.DataPointRow;
+import org.kairosdb.core.datastore.Datastore;
+import org.kairosdb.core.datastore.DatastoreMetricQuery;
+import org.kairosdb.core.datastore.Order;
+import org.kairosdb.core.datastore.QueryCallback;
+import org.kairosdb.core.datastore.QueryPlugin;
+import org.kairosdb.core.datastore.TagSet;
+import org.kairosdb.core.datastore.TagSetImpl;
 import org.kairosdb.core.exception.DatastoreException;
 import org.kairosdb.core.queue.EventCompletionCallBack;
 import org.kairosdb.core.queue.ProcessorHandler;
@@ -43,14 +68,20 @@ import org.kairosdb.util.SimpleStatsReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.annotation.Nullable;
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.charset.Charset;
-import java.util.*;
-import java.util.concurrent.*;
-
-import static com.google.common.base.Preconditions.checkNotNull;
+import com.datastax.driver.core.BoundStatement;
+import com.datastax.driver.core.PreparedStatement;
+import com.datastax.driver.core.ResultSet;
+import com.datastax.driver.core.ResultSetFuture;
+import com.datastax.driver.core.Row;
+import com.datastax.driver.core.Session;
+import com.google.common.collect.SetMultimap;
+import com.google.common.eventbus.EventBus;
+import com.google.common.eventbus.Subscribe;
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.inject.Inject;
+import com.google.inject.name.Named;
 
 public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMetricReporter
 {
@@ -462,24 +493,43 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 		private final DataPointsRowKey m_rowKey;
 		private final QueryCallback m_callback;
 		private final Semaphore m_semaphore;
+		private final boolean m_sendStart;
 
-		public QueryListener(DataPointsRowKey rowKey, QueryCallback callback, Semaphore querySemaphor)
-		{
+		public QueryListener(boolean sendStart, DataPointsRowKey rowKey, QueryCallback callback, Semaphore querySemaphor)
+		{		    
 			m_rowKey = rowKey;
 			m_callback = callback;
 			m_semaphore = querySemaphor;
+			m_sendStart = sendStart;
 		}
 
+		private String getHash(DataPointsRowKey rowKey) {
+	        String name= rowKey.getMetricName();
+	        String type = rowKey.getDataType();
+	        StringBuilder sb = new StringBuilder();
+	        for (Map.Entry<String,String> entry: rowKey.getTags().entrySet()){
+	            sb.append(entry.getKey()).append(entry.getValue());
+	        }
+	        return name+"-"+type+"-"+sb.toString();
+	    }
+	    
+		
 		@Override
 		public void onSuccess(@Nullable ResultSet result)
 		{
+		    BucketCache cache = null;
 			try
 			{
-				m_callback.startDataPointSet(m_rowKey.getDataType(), m_rowKey.getTags());
-
+			    if (m_sendStart) {
+			        m_callback.startDataPointSet(m_rowKey.getDataType(), m_rowKey.getTags());
+			    }
+				String hash = getHash(m_rowKey); 
 				DataPointFactory dataPointFactory = null;
 				dataPointFactory = m_kairosDataPointFactory.getFactoryForDataStoreType(m_rowKey.getDataType());
-
+				int dpCount = 0;
+				if (result.isExhausted()){
+				        System.out.println("empty resultset");
+				}
 				while (!result.isExhausted())
 				{
 					Row row = result.one();
@@ -488,8 +538,18 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 					int columnTime = bytes.getInt();
 
 					ByteBuffer value = row.getBytes(1);
-					long timestamp = getColumnTimestamp(m_rowKey.getTimestamp(), columnTime);
-
+					long timestamp = getColumnTimestamp(m_rowKey.getTimestamp(), columnTime);					
+					String bucketHash = hash+BucketCache.truncate(timestamp, 60_000);
+					BucketCache testBucket = caches.get(bucketHash);
+					if (testBucket == null && cache != null) {
+					    cache.closeCacheFile();
+					}
+					cache = caches.get(bucketHash);
+	                if (cache == null) {
+	                    cache = new BucketCache(m_kairosDataPointFactory);
+	                    caches.put(bucketHash, cache);
+	                }
+	                
 					//If type is legacy type it will point to the same object, no need for equals
 					if (m_rowKey.getDataType() == LegacyDataPointFactory.DATASTORE_TYPE)
 					{
@@ -508,8 +568,11 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 					}
 					else
 					{
-						m_callback.addDataPoint(
-								dataPointFactory.getDataPoint(timestamp, KDataInput.createInput(value)));
+					    //System.out.println("got datapoint: " +dpCount);
+					    DataPoint datapoint = dataPointFactory.getDataPoint(timestamp, 
+					                                                                                                 KDataInput.createInput(value));
+					    cache.writeToCache(bucketHash, datapoint);
+						m_callback.addDataPoint(datapoint);
 					}
 
 				}
@@ -521,6 +584,18 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 			}
 			finally
 			{
+			    if (cache != null) {
+			        try {
+			            cache.closeCacheFile();
+			        }
+    			    catch(Exception e)
+    			    {
+    			        logger.error("failed to close cache file!",e);
+    			    }
+			    }
+			    else{
+			        System.out.println("no cache file?");
+			    }
 				m_semaphore.release();
 			}
 		}
@@ -533,7 +608,17 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 		}
 	}
 
-
+	private static final Map<String,BucketCache> caches = new ConcurrentHashMap<>();
+	
+	private String getHash(DataPointsRowKey rowKey) {
+	    String name= rowKey.getMetricName();
+	    String type = rowKey.getDataType();
+	    StringBuilder sb = new StringBuilder();
+	    for (Map.Entry<String,String> entry: rowKey.getTags().entrySet()){
+	        sb.append(entry.getKey()).append(entry.getValue());
+	    }
+	    return name+"-"+type+"-"+sb.toString();
+    }
 	private void cqlQueryWithRowKeys(DatastoreMetricQuery query,
 			QueryCallback queryCallback, Iterator<DataPointsRowKey> rowKeys)
 	{
@@ -542,6 +627,13 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 		int rowCount = 0;
 		long queryStartTime = query.getStartTime();
 		long queryEndTime = query.getEndTime();
+		
+		//adjust for our caching
+		queryEndTime = queryEndTime - 60_000; // never query list 1 bucket of data.
+        if (queryEndTime > System.currentTimeMillis()) {
+              queryEndTime = System.currentTimeMillis() - 60_000;
+        }
+        queryEndTime = BucketCache.truncate(queryEndTime, 60_000);
 
 		ExecutorService resultsExecutor = Executors.newSingleThreadExecutor();
 		//Controls the number of queries sent out at the same time.
@@ -551,19 +643,70 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 		{
 			rowCount ++;
 			DataPointsRowKey rowKey = rowKeys.next();
+						
+			String cacheKey =  getHash(rowKey) + BucketCache.truncate(queryStartTime, 60_000); 		
+			List<BucketCache> cacheHits = getCaches(getHash(rowKey), queryStartTime, queryEndTime);			
+			if (!cacheHits.isEmpty()) 
+			{
+			    int dataPointsInCache = 0;
+			    try
+			    {
+    			    DataPoint p = null;
+    			    for (BucketCache c : cacheHits) 
+    			    {
+        			    // for first read: send startDataPoints
+        			        // addDataPoint foreach p
+        			    // end dataPoint (if full cacheHits..etc..(skip startDataPoints of going back to db.)    			
+    			        DataPoint tmp = c.next(rowKey.getDataType());
+    			        if (p == null) {
+    			            // first point
+    			            queryCallback.startDataPointSet(rowKey.getDataType(), rowKey.getTags());
+    			        }
+    			        do 
+        			    {    			        
+        			         if (tmp != null) 
+        			         { 
+        			             // notify new dataPoint.
+        			             p = tmp;
+        			             queryCallback.addDataPoint(p);
+        			             tmp = c.next(rowKey.getDataType());
+        			             dataPointsInCache++;
+        			         }
+        			    } while(tmp != null);
+    			        System.out.println("dataPoints in cache: " + dataPointsInCache + " " + c.getName());
+    			    }    			    
+    			    if (p!=null && p.getTimestamp()  + 60_000 < queryEndTime) 
+    			    {
+    			        System.out.println("partial cache hit: "+ (queryEndTime - p.getTimestamp()));
+    			        // partial cache hit..need to query starting at p.getTimeStamp()
+    			        queryStartTime = p.getTimestamp();
+    			        
+    			    } 
+    			    else{
+    			        System.out.println("FULL CACHE HIT");
+    			        // full cache hit, send endDataPoint, and exit.
+    			        queryCallback.endDataPoints();
+    			        //resultsExecutor.shutdown();
+    			        continue;
+    			    }
+			    }
+			    catch(Exception e) {
+			        logger.error("exception processing cache files/dispatching results", e);			        
+	            }
+			} 
+			
 			long tierRowTime = rowKey.getTimestamp();
-			int startTime;
-			int endTime;
-			if (queryStartTime < tierRowTime)
-				startTime = 0;
-			else
-				startTime = getColumnName(tierRowTime, queryStartTime);
+            int startTime;
+            int endTime;
+            if (queryStartTime < tierRowTime)
+                startTime = 0;
+            else
+                startTime = getColumnName(tierRowTime, queryStartTime);
 
-			if (queryEndTime > (tierRowTime + ROW_WIDTH))
-				endTime = getColumnName(tierRowTime, tierRowTime + ROW_WIDTH) +1;
-			else
-				endTime = getColumnName(tierRowTime, queryEndTime) +1; //add 1 so we get 0x1 for last bit
-
+            if (queryEndTime > (tierRowTime + ROW_WIDTH))
+                endTime = getColumnName(tierRowTime, tierRowTime + ROW_WIDTH) +1;
+            else
+                endTime = getColumnName(tierRowTime, queryEndTime) +1; //add 1 so we get 0x1 for last bit
 			ByteBuffer startBuffer = ByteBuffer.allocate(4);
 			startBuffer.putInt(startTime);
 			startBuffer.rewind();
@@ -577,8 +720,7 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 				boundStatement = new BoundStatement(m_preparedStatements.psDataPointsQueryAsc);
 			else
 				boundStatement = new BoundStatement(m_preparedStatements.psDataPointsQueryDesc);
-
-			boundStatement.setBytesUnsafe(0, DATA_POINTS_ROW_KEY_SERIALIZER.toByteBuffer(rowKey));
+			boundStatement.setBytesUnsafe(0,DATA_POINTS_ROW_KEY_SERIALIZER.toByteBuffer(rowKey));
 			boundStatement.setBytesUnsafe(1, startBuffer);
 			boundStatement.setBytesUnsafe(2, endBuffer);
 			//boundStatement.setInt(3, Integer.MAX_VALUE);
@@ -595,7 +737,7 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 			}
 			ResultSetFuture resultSetFuture = m_session.executeAsync(boundStatement);
 
-			Futures.addCallback(resultSetFuture, new QueryListener(rowKey, queryCallback, querySemaphor), resultsExecutor);
+			Futures.addCallback(resultSetFuture, new QueryListener(cacheHits.isEmpty(), rowKey, queryCallback, querySemaphor), resultsExecutor);
 		}
 
 		ThreadReporter.addDataPoint(KEY_QUERY_TIME, System.currentTimeMillis() - timerStart);
@@ -617,6 +759,23 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 		}
 	}
 
+	private List<BucketCache> getCaches(String hash, long startTime, long endTime){
+	    long currentTime = BucketCache.truncate(startTime,60_000);
+	    List<BucketCache> caches = new LinkedList<>();
+	    while(currentTime < endTime) {
+	        File f = new File("/tmp/cache/"+hash+currentTime);
+	        if (f.exists()) {
+	            System.out.println("cache hit at: " + currentTime);
+	            BucketCache cache = new BucketCache(m_kairosDataPointFactory, f);
+	            caches.add(cache);
+	        }
+	        else{
+	            System.out.println("cache miss at: " + currentTime);
+	        }
+	        currentTime += 60_000;	        
+	    }
+	    return caches;	    
+	}
 
 	@Override
 	public void deleteDataPoints(DatastoreMetricQuery deleteQuery) throws DatastoreException
