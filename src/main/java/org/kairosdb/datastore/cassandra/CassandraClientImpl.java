@@ -1,12 +1,8 @@
 package org.kairosdb.datastore.cassandra;
 
-import com.codahale.metrics.*;
-import com.datastax.driver.core.*;
-import com.datastax.driver.core.ConsistencyLevel;
-import com.datastax.driver.core.policies.DCAwareRoundRobinPolicy;
-import com.datastax.driver.core.policies.TokenAwarePolicy;
-import com.google.inject.Inject;
-import com.google.inject.name.Named;
+import java.util.ArrayList;
+import java.util.List;
+
 import org.kairosdb.core.DataPointSet;
 import org.kairosdb.core.datapoints.DoubleDataPointFactory;
 import org.kairosdb.core.datapoints.DoubleDataPointFactoryImpl;
@@ -14,8 +10,20 @@ import org.kairosdb.core.datapoints.LongDataPointFactory;
 import org.kairosdb.core.datapoints.LongDataPointFactoryImpl;
 import org.kairosdb.core.reporting.KairosMetricReporter;
 
-import java.util.ArrayList;
-import java.util.List;
+import com.codahale.metrics.Snapshot;
+import com.datastax.driver.core.Cluster;
+import com.datastax.driver.core.ConsistencyLevel;
+import com.datastax.driver.core.HostDistance;
+import com.datastax.driver.core.Metrics;
+import com.datastax.driver.core.PoolingOptions;
+import com.datastax.driver.core.ProtocolOptions;
+import com.datastax.driver.core.QueryOptions;
+import com.datastax.driver.core.Session;
+import com.datastax.driver.core.TimestampGenerator;
+import com.datastax.driver.core.policies.DCAwareRoundRobinPolicy;
+import com.datastax.driver.core.policies.TokenAwarePolicy;
+import com.google.inject.Inject;
+import com.google.inject.name.Named;
 
 /**
  Created by bhawkins on 3/4/15.
@@ -43,7 +51,10 @@ public class CassandraClientImpl implements CassandraClient, KairosMetricReporte
 	public CassandraClientImpl(@Named(KEYSPACE_PROPERTY)String keyspace,
 			@Named(HOST_LIST_PROPERTY)String hostList)
 	{
-		final Cluster.Builder builder = new Cluster.Builder()
+	    Cluster.Builder builder = null;
+	    try
+	    {
+		 builder = new Cluster.Builder()
 				.withPoolingOptions(new PoolingOptions().setConnectionsPerHost(HostDistance.LOCAL, 3, 100)
 					.setMaxRequestsPerConnection(HostDistance.LOCAL, 1024))
 				.withLoadBalancingPolicy(new TokenAwarePolicy(DCAwareRoundRobinPolicy.builder().build()))
@@ -58,14 +69,21 @@ public class CassandraClientImpl implements CassandraClient, KairosMetricReporte
 						return System.currentTimeMillis();
 					}
 				});
-
+	    }catch(Exception e) {
+	        e.printStackTrace();
+	    }
 
 		for (String node : hostList.split(","))
 		{
 			builder.addContactPoint(node.split(":")[0]);
 		}
 
-		m_cluster = builder.build();
+		try {
+		    m_cluster = builder.build();
+		}catch(Exception e) {
+		    e.printStackTrace();
+		    throw e;
+		}
 		m_keyspace = keyspace;
 	}
 
