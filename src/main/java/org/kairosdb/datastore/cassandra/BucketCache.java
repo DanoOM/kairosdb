@@ -21,6 +21,8 @@ public class BucketCache {
         private long currentTimeWindow = 0;
         private KairosDataPointFactory m_dataPointFactory;
         int dataPointsInCache = 0;
+        private long bucketTimestamp;
+        
         
         /*public static BucketCache openCacheFile(File f) {
             BucketCache c = new BucketCache();
@@ -32,19 +34,25 @@ public class BucketCache {
             m_dataPointFactory = dataPointFactory;
         }
         
-        public BucketCache(KairosDataPointFactory dataPointFactory, File f){
+        public BucketCache(KairosDataPointFactory dataPointFactory, File f, long timestamp){
             m_dataPointFactory = dataPointFactory;
             m_currentCacheFile = f;
+            bucketTimestamp = timestamp;
         }
         
         public String getName(){
             return m_currentCacheFile.getName();
         }
         
+        public long getBucketTimestamp(){
+            return bucketTimestamp;
+        }
+        
+        
         public void writeToCache(String cacheFile, DataPoint datapoint) throws IOException, FileNotFoundException{
             cacheFile = "/tmp/cache/" + cacheFile;
             long ts = truncate(datapoint.getTimestamp(), m_timeWindow);
-            if (m_dataOutputStream == null) {
+            if (m_dataOutputStream == null) {                
                 m_currentCacheFile = new File(cacheFile);
                 openCacheFile(m_currentCacheFile);
                 currentTimeWindow = ts;
@@ -61,9 +69,10 @@ public class BucketCache {
         }
         
         public void closeCacheFile() throws IOException {
-            System.out.println("closing cache with dataPoints: " + dataPointsInCache + " " + m_currentCacheFile.getName());
+            //System.out.println("closing cache with dataPoints: " + dataPointsInCache + " " + m_currentCacheFile.getAbsolutePath());
             if (m_dataOutputStream != null) {
                 m_dataOutputStream.flush();
+                m_dataOutputStream.close();                
             }
             else {
                 System.out.println("closing cache NO OUTPUTSTREAM!: " + dataPointsInCache);

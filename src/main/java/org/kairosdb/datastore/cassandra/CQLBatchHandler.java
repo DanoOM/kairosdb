@@ -112,6 +112,7 @@ public class CQLBatchHandler extends BatchHandler
 	@Override
 	public void submitBatch()
 	{
+	    
 		if (metricNamesBatch.size() != 0)
 		{
 			m_session.executeAsync(metricNamesBatch);

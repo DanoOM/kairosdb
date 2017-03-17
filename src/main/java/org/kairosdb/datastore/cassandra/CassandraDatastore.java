@@ -87,6 +87,7 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 {
 	public static final Logger logger = LoggerFactory.getLogger(CassandraDatastore.class);
 
+	public static final long BUCKET_TIME_WINDOW = 60_000;
 
 	public static final String CREATE_KEYSPACE = "" +
 			"CREATE KEYSPACE IF NOT EXISTS %s" +
@@ -494,6 +495,7 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 		private final QueryCallback m_callback;
 		private final Semaphore m_semaphore;
 		private final boolean m_sendStart;
+		private final Map<String,BucketCache> caches = new ConcurrentHashMap<>();
 
 		public QueryListener(boolean sendStart, DataPointsRowKey rowKey, QueryCallback callback, Semaphore querySemaphor)
 		{		    
@@ -539,7 +541,7 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 
 					ByteBuffer value = row.getBytes(1);
 					long timestamp = getColumnTimestamp(m_rowKey.getTimestamp(), columnTime);					
-					String bucketHash = hash+BucketCache.truncate(timestamp, 60_000);
+					String bucketHash = hash+BucketCache.truncate(timestamp, BUCKET_TIME_WINDOW);
 					BucketCache testBucket = caches.get(bucketHash);
 					if (testBucket == null && cache != null) {
 					    cache.closeCacheFile();
@@ -592,10 +594,7 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
     			    {
     			        logger.error("failed to close cache file!",e);
     			    }
-			    }
-			    else{
-			        System.out.println("no cache file?");
-			    }
+			    }			    
 				m_semaphore.release();
 			}
 		}
@@ -608,7 +607,7 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 		}
 	}
 
-	private static final Map<String,BucketCache> caches = new ConcurrentHashMap<>();
+	
 	
 	private String getHash(DataPointsRowKey rowKey) {
 	    String name= rowKey.getMetricName();
@@ -629,11 +628,11 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 		long queryEndTime = query.getEndTime();
 		
 		//adjust for our caching
-		queryEndTime = queryEndTime - 60_000; // never query list 1 bucket of data.
+		queryEndTime = queryEndTime - BUCKET_TIME_WINDOW; // never query list 1 bucket of data.
         if (queryEndTime > System.currentTimeMillis()) {
-              queryEndTime = System.currentTimeMillis() - 60_000;
+              queryEndTime = System.currentTimeMillis() - BUCKET_TIME_WINDOW;
         }
-        queryEndTime = BucketCache.truncate(queryEndTime, 60_000);
+        queryEndTime = BucketCache.truncate(queryEndTime, BUCKET_TIME_WINDOW);
 
 		ExecutorService resultsExecutor = Executors.newSingleThreadExecutor();
 		//Controls the number of queries sent out at the same time.
@@ -644,7 +643,7 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 			rowCount ++;
 			DataPointsRowKey rowKey = rowKeys.next();
 						
-			String cacheKey =  getHash(rowKey) + BucketCache.truncate(queryStartTime, 60_000); 		
+			String cacheKey =  getHash(rowKey) + BucketCache.truncate(queryStartTime, BUCKET_TIME_WINDOW); 		
 			List<BucketCache> cacheHits = getCaches(getHash(rowKey), queryStartTime, queryEndTime);			
 			if (!cacheHits.isEmpty()) 
 			{
@@ -652,8 +651,10 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 			    try
 			    {
     			    DataPoint p = null;
+    			    BucketCache lastCache = null;
     			    for (BucketCache c : cacheHits) 
     			    {
+    			        lastCache  = c;
         			    // for first read: send startDataPoints
         			        // addDataPoint foreach p
         			    // end dataPoint (if full cacheHits..etc..(skip startDataPoints of going back to db.)    			
@@ -675,11 +676,12 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
         			    } while(tmp != null);
     			        System.out.println("dataPoints in cache: " + dataPointsInCache + " " + c.getName());
     			    }    			    
-    			    if (p!=null && p.getTimestamp()  + 60_000 < queryEndTime) 
+    			    if (lastCache != null  && lastCache.getBucketTimestamp() + BUCKET_TIME_WINDOW < queryEndTime) 
     			    {
-    			        System.out.println("partial cache hit: "+ (queryEndTime - p.getTimestamp()));
-    			        // partial cache hit..need to query starting at p.getTimeStamp()
-    			        queryStartTime = p.getTimestamp();
+    			        System.out.println("partial cache hit: "+ ((queryEndTime - (lastCache.getBucketTimestamp() + BUCKET_TIME_WINDOW))/BUCKET_TIME_WINDOW) );
+    			        // partial cache hit..need to query starting, at beginning of next bucket
+    			        queryStartTime = lastCache.getBucketTimestamp() + BUCKET_TIME_WINDOW;
+    			    //    continue;
     			        
     			    } 
     			    else{
@@ -759,20 +761,24 @@ public class CassandraDatastore implements Datastore, ProcessorHandler, KairosMe
 		}
 	}
 
+	final Map<String,Boolean> nackCache = new ConcurrentHashMap<>();
 	private List<BucketCache> getCaches(String hash, long startTime, long endTime){
-	    long currentTime = BucketCache.truncate(startTime,60_000);
+	    long currentTime = BucketCache.truncate(startTime,BUCKET_TIME_WINDOW);
 	    List<BucketCache> caches = new LinkedList<>();
 	    while(currentTime < endTime) {
-	        File f = new File("/tmp/cache/"+hash+currentTime);
-	        if (f.exists()) {
-	            System.out.println("cache hit at: " + currentTime);
-	            BucketCache cache = new BucketCache(m_kairosDataPointFactory, f);
-	            caches.add(cache);
-	        }
-	        else{
-	            System.out.println("cache miss at: " + currentTime);
-	        }
-	        currentTime += 60_000;	        
+	        String key = hash+currentTime;
+	        if (!nackCache.containsKey(key)) {
+    	        File f = new File("/tmp/cache/"+key);
+    	        if (f.exists()) {
+    	            System.out.println("cache hit at: " + currentTime);
+    	            BucketCache cache = new BucketCache(m_kairosDataPointFactory, f, currentTime);
+    	            caches.add(cache);
+    	        }
+    	        else{
+    	            nackCache.put(hash+currentTime, Boolean.FALSE);
+    	        }
+	        }	        
+	        currentTime += BUCKET_TIME_WINDOW;	        
 	    }
 	    return caches;	    
 	}
